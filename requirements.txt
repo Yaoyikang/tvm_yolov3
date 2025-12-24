@@ -1,0 +1,5 @@
+numpy>=1.23
+onnx>=1.14
+pillow>=10.0
+# 可选：用于对照验证（不强制）
+onnxruntime>=1.16
