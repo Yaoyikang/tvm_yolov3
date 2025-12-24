@@ -49,12 +49,27 @@ TVM_LIBRARY_PATH=/root/myfold/tvm/build_cuda \
 python scripts/compile_yolov3.py --onnx /path/to/yolov3.onnx --target cuda --out_dir artifacts/yolov3_cuda_tuned --tune
 ```
 
+如果你启用了 `--fast_scatter_nd`（针对 YOLO 的 `scatter_nd*` 做专用实现替换），建议把产物固定到：
+
+```bash
+TVM_LIBRARY_PATH=/root/myfold/tvm/build_cuda \
+python scripts/compile_yolov3.py \
+  --onnx /path/to/yolov3.onnx \
+  --target cuda \
+  --out_dir artifacts/yolov3_cuda_opt_fastscatter \
+  --fast_scatter_nd
+```
+
 ### 2) 运行与测速
 
 ```bash
 # 随机输入基准
 TVM_LIBRARY_PATH=/root/myfold/tvm/build_cuda \
 python scripts/bench_yolov3.py --artifact_dir artifacts/yolov3_cuda --device cuda --iters 200
+
+# fast_scatter_nd 版本
+TVM_LIBRARY_PATH=/root/myfold/tvm/build_cuda \
+python scripts/bench_yolov3.py --artifact_dir artifacts/yolov3_cuda_opt_fastscatter --device cuda --iters 200
 
 # 用图片跑一次（RGB + resize 到模型输入尺寸 + 可选缩放），并把输出保存成 npz
 TVM_LIBRARY_PATH=/root/myfold/tvm/build_cuda \

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -131,7 +132,25 @@ def _nms_xyxy(boxes: np.ndarray, scores: np.ndarray, iou_thresh: float) -> np.nd
     x2 = boxes[:, 2]
     y2 = boxes[:, 3]
 
-    areas = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+    # Filter degenerate boxes to avoid zero-area / invalid IoU math.
+    w = x2 - x1
+    h = y2 - y1
+    valid = (w > 0.0) & (h > 0.0)
+    if not np.any(valid):
+        return np.zeros((0,), dtype=np.int64)
+
+    if not np.all(valid):
+        orig_idx = np.where(valid)[0]
+        boxes = boxes[valid]
+        scores = scores[valid]
+        x1 = boxes[:, 0]
+        y1 = boxes[:, 1]
+        x2 = boxes[:, 2]
+        y2 = boxes[:, 3]
+    else:
+        orig_idx = None
+
+    areas = (x2 - x1) * (y2 - y1)
     order = np.argsort(scores)[::-1]
 
     keep = []
@@ -153,10 +172,15 @@ def _nms_xyxy(boxes: np.ndarray, scores: np.ndarray, iou_thresh: float) -> np.nd
         inter = inter_w * inter_h
 
         union = areas[i] + areas[rest] - inter
-        iou = np.where(union > 0.0, inter / union, 0.0)
+        # Avoid RuntimeWarning: np.where evaluates both branches (inter/union).
+        iou = np.zeros_like(union, dtype=np.float32)
+        np.divide(inter, union, out=iou, where=union > 0.0)
         order = rest[iou < float(iou_thresh)]
 
-    return np.asarray(keep, dtype=np.int64)
+    keep = np.asarray(keep, dtype=np.int64)
+    if orig_idx is not None:
+        keep = orig_idx[keep]
+    return keep
 
 
 def _draw_boxes(
@@ -286,10 +310,21 @@ def main() -> None:
         default=None,
         help="Optional: save a visualization image with bounding boxes (requires --image).",
     )
-    p.add_argument("--score_thresh", type=float, default=0.25, help="Score threshold for visualization")
-    p.add_argument("--max_dets", type=int, default=100, help="Max detections to draw")
+    p.add_argument("--score_thresh", type=float, default=0.3, help="Score threshold for visualization")
+    p.add_argument("--max_dets", type=int, default=20, help="Max detections to draw")
     p.add_argument("--nms", action="store_true", help="Enable NMS (class-aware) before drawing")
     p.add_argument("--nms_iou", type=float, default=0.45, help="NMS IoU threshold")
+    p.add_argument(
+        "--profile",
+        action="store_true",
+        help="Print per-operator timing report (Relax VM profiler).",
+    )
+    p.add_argument(
+        "--profile_topk",
+        type=int,
+        default=30,
+        help="Show top-k ops by duration when --profile is set.",
+    )
     p.add_argument(
         "--class_id",
         default=None,
@@ -319,7 +354,47 @@ def main() -> None:
     else:
         x = np.random.randn(n, c, h, w).astype(input_dtype)
 
-    vm, dev, rt = create_vm(artifact, device=args.device, device_id=args.device_id)
+    vm, dev, rt = create_vm(artifact, device=args.device, device_id=args.device_id, profile=bool(args.profile))
+
+    if args.profile:
+        # Per-op profiling (one warmup + one measured run inside VM profiler)
+        x_rt = rt.tensor(x, device=dev)
+        report = vm.profile("main", x_rt)
+        calls = json.loads(report.json()).get("calls", [])
+
+        def _unwrap(v):
+            if isinstance(v, dict):
+                for key in ("microseconds", "percent", "count", "string"):
+                    if key in v:
+                        return v[key]
+                if len(v) == 1:
+                    return next(iter(v.values()))
+            return v
+
+        def _as_float(v, default: float = 0.0) -> float:
+            v = _unwrap(v)
+            try:
+                return float(v)
+            except Exception:
+                return float(default)
+
+        # Sort defensively in case the default order changes.
+        calls = sorted(calls, key=lambda r: _as_float(r.get("Duration (us)"), 0.0), reverse=True)
+        topk = max(1, int(args.profile_topk))
+        print("\n=== Per-op Profile (Top", topk, ") ===")
+        print(f"{'Rank':>4}  {'Op':<40}  {'Time(us)':>10}  {'Pct':>8}  {'Count':>5}  {'Device':<6}")
+        for i, r in enumerate(calls[:topk], start=1):
+            name = str(_unwrap(r.get("Name", "")))
+            dur = _as_float(r.get("Duration (us)"), 0.0)
+            pct_v = _as_float(r.get("Percent"), 0.0)
+            pct = f"{(pct_v * 100.0 if pct_v <= 1.0 else pct_v):.2f}%"
+            cnt = str(int(_as_float(r.get("Count"), 0.0)))
+            dev_name = str(_unwrap(r.get("Device", "")))
+            if len(name) > 40:
+                name = name[:37] + "..."
+            print(f"{i:>4}  {name:<40}  {dur:>10.2f}  {pct:>8}  {cnt:>5}  {dev_name:<6}")
+        print("=== End Profile ===\n")
+
     avg_ms, outputs = benchmark(vm, rt, dev, input_name=input_name, input_data=x, warmup=args.warmup, iters=args.iters)
 
     print("avg latency (ms):", round(avg_ms, 4))

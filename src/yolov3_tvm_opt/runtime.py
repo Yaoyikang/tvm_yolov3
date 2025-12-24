@@ -27,7 +27,7 @@ def load_artifact(artifact_dir: str) -> Artifact:
     return Artifact(lib_path=lib_path, meta=meta)
 
 
-def create_vm(artifact: Artifact, device: str = "cuda", device_id: int = 0):
+def create_vm(artifact: Artifact, device: str = "cuda", device_id: int = 0, profile: bool = False):
     tvm = tvm_import()
     from tvm import relax
     from tvm.runtime import _tensor as rt
@@ -41,7 +41,7 @@ def create_vm(artifact: Artifact, device: str = "cuda", device_id: int = 0):
 
     lib = tvm.runtime.load_module(artifact.lib_path)
     ex = relax.vm_build.VMExecutable(lib)
-    vm = relax.VirtualMachine(ex, dev)
+    vm = relax.VirtualMachine(ex, dev, profile=bool(profile))
     return vm, dev, rt
 
 
@@ -62,10 +62,16 @@ def benchmark(
     for _ in range(warmup):
         _ = fn(x)
 
+    # CUDA kernels are async; sync to get accurate wall-clock timing.
+    if hasattr(dev, "sync"):
+        dev.sync()
+
     t0 = time.time()
     out = None
     for _ in range(iters):
         out = fn(x)
+    if hasattr(dev, "sync"):
+        dev.sync()
     t1 = time.time()
 
     outputs: Dict[str, np.ndarray] = {}
